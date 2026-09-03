@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,13 +17,20 @@ from typing import Tuple
 
 import jax
 import jax.numpy as jnp
+import jax.scipy as jsp
 
 from ott.math import fixed_point_loop
 
 __all__ = ["sqrtm", "sqrtm_only", "inv_sqrtm_only"]
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=(
+        "threshold", "min_iterations", "inner_iterations", "max_iterations",
+        "regularization"
+    )
+)
 def sqrtm(
     x: jnp.ndarray,
     threshold: float = 1e-6,
@@ -141,7 +148,8 @@ def solve_sylvester_bartels_stewart(
   for j in range(n):
     lhs = r.at[..., idx, idx].add(-s[..., j:j + 1, j])
     rhs = d[..., j] + jnp.matmul(y[..., :j], s[..., :j, j:j + 1])[..., 0]
-    y = y.at[..., j].set(jax.scipy.linalg.solve_triangular(lhs, rhs))
+    y_j = jsp.linalg.solve_triangular(lhs, rhs[..., None])
+    y = y.at[..., j].set(y_j.squeeze(-1))
 
   x = jnp.matmul(
       u, jnp.matmul(y, jnp.conjugate(jnp.swapaxes(v, axis1=-2, axis2=-1)))
@@ -233,7 +241,13 @@ sqrtm.defvjp(sqrtm_fwd, sqrtm_bwd)
 # These functions have lower complexity gradients than sqrtm.
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=(
+        "threshold", "min_iterations", "inner_iterations", "max_iterations",
+        "regularization"
+    )
+)
 def sqrtm_only(  # noqa: D103
     x: jnp.ndarray,
     threshold: float = 1e-6,
@@ -279,7 +293,13 @@ def sqrtm_only_bwd(  # noqa: D103
 sqrtm_only.defvjp(sqrtm_only_fwd, sqrtm_only_bwd)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=(
+        "threshold", "min_iterations", "inner_iterations", "max_iterations",
+        "regularization"
+    )
+)
 def inv_sqrtm_only(  # noqa: D103
     x: jnp.ndarray,
     threshold: float = 1e-6,

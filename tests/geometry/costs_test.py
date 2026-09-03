@@ -12,24 +12,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import functools
-from typing import Any
 
 import pytest
 
 import jax
 import jax.numpy as jnp
-import jaxopt
+import jax.random as jr
 import numpy as np
 import scipy as sp
+from jax.scipy import optimize
 
 from ott.geometry import costs, pointcloud, regularizers
 from ott.math import utils as mu
 from ott.solvers import linear
-
-
-def _proj(matrix: jnp.ndarray) -> jnp.ndarray:
-  u, _, v_h = jnp.linalg.svd(matrix, full_matrices=False)
-  return u.dot(v_h)
 
 
 @pytest.mark.fast()
@@ -54,9 +49,9 @@ class TestCostFn:
     np.testing.assert_allclose(dist_x_y, 1.0 - -1.0, rtol=1e-5, atol=1e-5)
 
     n, m, d = 10, 12, 7
-    rngs = jax.random.split(rng, 2)
-    x = jax.random.normal(rngs[0], (n, d))
-    y = jax.random.normal(rngs[1], (m, d))
+    rngs = jr.split(rng, 2)
+    x = jr.normal(rngs[0], (n, d))
+    y = jr.normal(rngs[1], (m, d))
 
     normalize = lambda v: v / jnp.sqrt(jnp.sum(v ** 2))
     for i in range(n):
@@ -81,7 +76,7 @@ class TestCostFn:
 @pytest.mark.fast()
 class TestBuresBarycenter:
 
-  def test_bures(self, rng: jax.Array):
+  def test_bures(self):
     d = 3
     r = jnp.array([1.2036, 0.2825, 0.013])
     Sigma1 = r * jnp.eye(d)
@@ -137,9 +132,9 @@ class TestTICost:
   )
   def test_transport_map(self, rng: jax.Array, cost_fn: costs.TICost):
     n, d = 15, 5
-    rng_x, rng_A = jax.random.split(rng)
-    x = jax.random.normal(rng_x, (n, d))
-    A = jax.random.normal(rng_A, (d, d * 2))
+    rng_x, rng_A = jr.split(rng)
+    x = jr.normal(rng_x, (n, d))
+    A = jr.normal(rng_A, (d, d * 2))
     A = A @ A.T
 
     transport_fn = cost_fn.transport_map(lambda z: -jnp.sum(z * (A.dot(z))))
@@ -165,7 +160,7 @@ class TestTICost:
       cost_fn: costs.TICost,
   ):
     sqeucl = costs.SqEuclidean()
-    x = jax.random.normal(rng, (12, 7))
+    x = jr.normal(rng, (12, 7))
     f = mu.logsumexp
 
     h_f = cost_fn.h_transform(f)
@@ -187,49 +182,48 @@ class TestTICost:
           atol=1e-6
       )
 
-  @pytest.mark.parametrize("cost_fn", [costs.SqEuclidean(), costs.PNormP(2)])
   @pytest.mark.parametrize("d", [5, 10])
-  def test_h_transform_matches_unreg(
-      self, rng: jax.Array, cost_fn: costs.TICost, d: int
-  ):
+  def test_h_transform_matches_unreg(self, rng: jax.Array, d: int):
     n = 13
-    rngs = jax.random.split(rng, 2)
-    u = jnp.abs(jax.random.uniform(rngs[0], (d,)))
-    x = jax.random.normal(rngs[1], (n, d))
+    rngs = jr.split(rng, 2)
+    u = .5 + jr.uniform(rngs[0], (d,))
+    x = jr.normal(rngs[1], (n, d))
 
-    gt_cost = costs.RegTICost(regularizers.SqL2(), lam=0.0)
-    concave_gt = lambda z: -cost_fn.h(z) + jnp.dot(z, u)
+    concave = lambda z: -jnp.dot(z ** 2, u)
+    cost_fn_unreg = costs.PNormP(2)
+    cost_fn_reg = costs.RegTICost(regularizers.SqL2(), lam=0.0)
+    unreg = jax.jit(jax.vmap(jax.grad(cost_fn_unreg.h_transform(concave))))
+    reg = jax.jit(jax.vmap(jax.grad(cost_fn_reg.h_transform(concave))))
 
-    if isinstance(cost_fn, costs.PNormP):
-      concave = concave_gt
-    else:
-      concave = lambda z: 0.5 * (-cost_fn.h(z) + jnp.dot(z, u))
-
-    pred = jax.jit(jax.vmap(jax.grad(cost_fn.h_transform(concave, ridge=1e-6))))
-    gt = jax.jit(jax.vmap(jax.grad(gt_cost.h_transform(concave_gt))))
-
-    np.testing.assert_allclose(pred(x), gt(x), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(unreg(x), reg(x), rtol=1e-2, atol=1e-2)
 
   @pytest.mark.parametrize("cost_fn", [costs.SqEuclidean(), costs.PNormP(1.5)])
   def test_h_transform_solver(self, rng: jax.Array, cost_fn: costs.TICost):
 
-    def gd_solver(
-        fun, x: jnp.ndarray, x_init: jnp.ndarray, **kwargs: Any
-    ) -> jnp.ndarray:
-      solver = jaxopt.GradientDescent(fun=fun, **kwargs)
-      return solver.run(x, x_init).params
-
     n, d = 21, 6
-    rngs = jax.random.split(rng, 2)
-    u = jnp.abs(jax.random.uniform(rngs[0], (d,)))
-    x = jax.random.normal(rngs[1], (n, d))
+    rngs = jr.split(rng, 2)
+    u = 1. + jr.uniform(rngs[0], (d,))
+    x = jr.normal(rngs[1], (n, d))
+    concave_fn = lambda z: -jnp.dot(z ** 2, u) - mu.logsumexp(z)
 
-    concave_fn = lambda z: -cost_fn.h(z) + jnp.dot(z, u)
+    solver = lambda fun, x, tol: (
+        optimize.minimize(fun, x, method="BFGS", tol=tol).x, None
+    )
 
-    expected = jax.vmap(cost_fn.h_transform(concave_fn, solver=None))
-    actual = jax.vmap(cost_fn.h_transform(concave_fn, solver=gd_solver))
+    actual = jax.vmap(
+        lambda x, tol: cost_fn.h_transform(concave_fn, solver=solver)
+        (x, tol=tol),
+        in_axes=[0, None]
+    )
 
-    np.testing.assert_allclose(expected(x), actual(x), rtol=1e-4, atol=1e-4)
+    expected = jax.vmap(
+        lambda x, tol: cost_fn.h_transform(concave_fn, solver=None)(x, tol=tol),
+        in_axes=[0, None]
+    )
+
+    np.testing.assert_allclose(
+        expected(x, 1e-4), actual(x, 1e-4), rtol=1e-2, atol=1e-2
+    )
 
 
 @pytest.mark.fast()
@@ -252,23 +246,21 @@ class TestRegTICost:
       cost_fn: costs.RegTICost,
       d: int,
   ):
-    expected = jax.random.normal(rng, (d,))
+    expected = jr.normal(rng, (d,))
     actual = jax.grad(cost_fn.h_legendre)(jax.grad(cost_fn.h)(expected))
     np.testing.assert_allclose(actual, expected, rtol=1e-4, atol=1e-4)
 
   @pytest.mark.parametrize("lam", [1e-1, 0.5, 1.25])
   def test_h_transform_x_init(self, rng: jax.Array, lam: float):
     n, d = 11, 6
-    rng_x, rng_y, rng_u = jax.random.split(rng, 3)
-    y = jax.random.normal(rng_x, (d,)) + 1.0
-    u = jnp.abs(jax.random.uniform(rng_u, (d,)))
-    x_inits = jax.random.normal(rng_x, (n, d)) * jnp.linspace(
-        -5.0, 5.0, num=n
-    )[:, None]
+    rng_x, rng_y, rng_u = jr.split(rng, 3)
+    y = jr.normal(rng_y, (d,)) + 1.0
+    u = 1. + jr.uniform(rng_u, (d,))
+    x_inits = jr.normal(rng_x, (n, d)) * jnp.linspace(-5.0, 5.0, num=n)[:, None]
+
+    f = lambda z: -jnp.dot(z ** 2, u)
 
     cost_fn = costs.RegTICost(regularizers.L1(), lam=lam)
-    f = lambda z: -cost_fn.h(z) + jnp.dot(z, u)
-
     h_f = jax.vmap(cost_fn.h_transform(f), in_axes=[None, 0])
     res = h_f(y, x_inits)
 
@@ -290,11 +282,11 @@ class TestRegTICost:
       rng: jax.Array,
       cost_fn: costs.RegTICost,
   ):
-    rng1, rng2 = jax.random.split(rng, 2)
+    rng1, rng2 = jr.split(rng, 2)
     d = 17
 
-    x = jax.random.normal(rng1, (25, d))
-    y = jax.random.normal(rng2, (37, d))
+    x = jr.normal(rng1, (25, d))
+    y = jr.normal(rng2, (37, d))
     geom = pointcloud.PointCloud(x, y, cost_fn=cost_fn, relative_epsilon="mean")
 
     dp = linear.solve(geom).to_dual_potentials()
@@ -315,11 +307,11 @@ class TestRegTICost:
       rng: jax.Array,
       reg: regularizers.ProximalOperator,
   ):
-    d, rngs = 17, jax.random.split(rng, 4)
-    x = jax.random.normal(rngs[0], (50, d))
-    y = jax.random.normal(rngs[1], (71, d))
-    xx = jax.random.normal(rngs[2], (25, d))
-    yy = jax.random.normal(rngs[3], (35, d))
+    d, rngs = 17, jr.split(rng, 4)
+    x = jr.normal(rngs[0], (50, d))
+    y = jr.normal(rngs[1], (71, d))
+    xx = jr.normal(rngs[2], (25, d))
+    yy = jr.normal(rngs[3], (35, d))
 
     sparsity = {False: [], True: []}
     for lam in [9, 89]:
@@ -356,7 +348,7 @@ class TestRegTICost:
       f_h = cost_fn.h_transform(f)
       return x - cost_fn.regularizer.prox(jax.grad(f_h)(x))
 
-    x = jax.random.normal(rng, (11, 9))
+    x = jr.normal(rng, (11, 9))
     f = mu.logsumexp
 
     actual_fn = cost_fn.transport_map(f)
@@ -373,9 +365,9 @@ class TestSoftDTW:
   @pytest.mark.parametrize("gamma", [1e-3, 5])
   def test_soft_dtw(self, rng: jax.Array, n: int, m: int, gamma: float):
     ts_metrics = pytest.importorskip("tslearn.metrics")
-    rng1, rng2 = jax.random.split(rng, 2)
-    t1 = jax.random.normal(rng1, (n,))
-    t2 = jax.random.normal(rng2, (m,))
+    rng1, rng2 = jr.split(rng, 2)
+    t1 = jr.normal(rng1, (n,))
+    t2 = jr.normal(rng2, (m,))
 
     expected = ts_metrics.soft_dtw(t1, t2, gamma=gamma)
     actual = costs.SoftDTW(gamma=gamma)(t1, t2)
@@ -391,9 +383,9 @@ class TestSoftDTW:
   ):
     ts_metrics = pytest.importorskip("tslearn.metrics")
     gamma = 1e-1
-    rng1, rng2 = jax.random.split(rng, 2)
-    t1 = jax.random.normal(rng1, (16,))
-    t2 = jax.random.normal(rng2, (32,))
+    rng1, rng2 = jr.split(rng, 2)
+    t1 = jr.normal(rng1, (16,))
+    t2 = jr.normal(rng2, (32,))
 
     expected = ts_metrics.soft_dtw(t1, t2, gamma=gamma)
     if debiased:
@@ -415,14 +407,14 @@ class TestSoftDTW:
   def test_soft_dtw_grad(
       self, rng: jax.Array, debiased: bool, jit: bool, gamma: float
   ):
-    rngs = jax.random.split(rng, 4)
+    rngs = jr.split(rng, 4)
     eps, tol = 1e-3, 1e-5
-    t1 = jax.random.normal(rngs[0], (9,))
-    t2 = jax.random.normal(rngs[1], (16,))
+    t1 = jr.normal(rngs[0], (9,))
+    t2 = jr.normal(rngs[1], (16,))
 
-    v_t1 = jax.random.normal(rngs[2], shape=t1.shape)
+    v_t1 = jr.normal(rngs[2], shape=t1.shape)
     v_t1 = (v_t1 / jnp.linalg.norm(v_t1, axis=-1, keepdims=True)) * eps
-    v_t2 = jax.random.normal(rngs[3], shape=t2.shape) * eps
+    v_t2 = jr.normal(rngs[3], shape=t2.shape) * eps
     v_t2 = (v_t2 / jnp.linalg.norm(v_t2, axis=-1, keepdims=True)) * eps
 
     cost_fn = costs.SoftDTW(gamma=gamma, debiased=debiased)

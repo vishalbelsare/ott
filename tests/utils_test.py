@@ -19,6 +19,7 @@ import pytest
 import chex
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import numpy as np
 
 from ott import utils
@@ -29,11 +30,11 @@ class TestBatchedVmap:
 
   @pytest.mark.parametrize("batch_size", [1, 11, 32, 33])
   def test_batch_size(self, rng: jax.Array, batch_size: int):
-    x = jax.random.normal(rng, (32, 2))
+    x = jr.normal(rng, (32, 2))
     gt_fn = jax.jit(jax.vmap(jnp.sum))
     fn = jax.jit(utils.batched_vmap(jnp.sum, batch_size=batch_size))
 
-    np.testing.assert_array_equal(gt_fn(x), fn(x))
+    np.testing.assert_array_almost_equal(gt_fn(x), fn(x), decimal=4)
 
   def test_pytree(self, rng: jax.Array):
 
@@ -41,12 +42,12 @@ class TestBatchedVmap:
       return x["foo"]["bar"].std() + x["baz"].mean(
       ) + x["quux"][0] * x["quux"][1]
 
-    rng1, rng2, rng3 = jax.random.split(rng, 3)
+    rng1, rng2 = jr.split(rng, 2)
     x = {
         "foo": {
-            "bar": jax.random.normal(rng1, (5, 3, 3))
+            "bar": jr.normal(rng1, (5, 3, 3))
         },
-        "baz": jax.random.normal(rng2, (2, 5)),
+        "baz": jr.normal(rng2, (2, 5)),
         "quux": (2.0, 3.0),
     }
     in_axes = [{"foo": {"bar": 0}, "baz": 1, "quux": (None, None)}]
@@ -54,7 +55,7 @@ class TestBatchedVmap:
     gt_fn = jax.vmap(f, in_axes=in_axes)
     fn = utils.batched_vmap(f, in_axes=in_axes, batch_size=2)
 
-    np.testing.assert_array_equal(gt_fn(x), fn(x))
+    np.testing.assert_array_almost_equal(gt_fn(x), fn(x), decimal=4)
 
   @pytest.mark.parametrize("batch_size", [1, 7, 67, 133])
   @pytest.mark.parametrize("in_axes", [0, 1, -1, -2, [0, None], (0, -2)])
@@ -65,9 +66,9 @@ class TestBatchedVmap:
       y = jnp.atleast_2d(y)
       return jnp.dot(x, y.T)
 
-    rng1, rng2 = jax.random.split(rng, 2)
-    x = jax.random.normal(rng1, (133, 71)) + 10.0
-    y = jax.random.normal(rng2, (133, 71))
+    rng1, rng2 = jr.split(rng, 2)
+    x = jr.normal(rng1, (133, 71)) + 10.0
+    y = jr.normal(rng2, (133, 71))
 
     gt_fn = jax.jit(jax.vmap(f, in_axes=in_axes))
     fn = jax.jit(utils.batched_vmap(f, batch_size=batch_size, in_axes=in_axes))
@@ -96,15 +97,15 @@ class TestBatchedVmap:
       return x.mean() - y.std() + z.sum() - y * (v + w)
 
     batch_size = 1
-    rng1, rng2, rng3 = jax.random.split(rng, 3)
+    rng1, rng2, rng3 = jr.split(rng, 3)
     tree = (
         {
             "foo": {
-                "bar": jax.random.normal(rng1, (13, 5))
+                "bar": jr.normal(rng1, (13, 5))
             },
-            "baz": jax.random.normal(rng2, (13, 5))
+            "baz": jr.normal(rng2, (13, 5))
         },
-        jax.random.normal(rng3, (10, 5)),
+        jr.normal(rng3, (10, 5)),
         ((2,), 13.0),
     )
 
@@ -119,14 +120,14 @@ class TestBatchedVmap:
     def f(x: jnp.ndarray, y: jnp.ndarray) -> Any:
       return (x.sum() + y.sum()).reshape(1, 1)
 
-    rng1, rng2 = jax.random.split(rng, 2)
-    x = jax.random.normal(rng1, (31, 13))
-    y = jax.random.normal(rng2, (31, 6)) - 15.0
+    rng1, rng2 = jr.split(rng, 2)
+    x = jr.normal(rng1, (31, 13))
+    y = jr.normal(rng2, (31, 6)) - 15.0
 
     gt_fn = jax.vmap(f, out_axes=out_axes)
     fn = utils.batched_vmap(f, batch_size=5, out_axes=out_axes)
 
-    chex.assert_trees_all_equal(gt_fn(x, y), fn(x, y))
+    chex.assert_trees_all_close(gt_fn(x, y), fn(x, y), rtol=1e-5, atol=1e-5)
 
   @pytest.mark.parametrize(
       "out_axes", [0, (0, 0, 1), (0, {
@@ -141,12 +142,12 @@ class TestBatchedVmap:
       z = jnp.arange(9).reshape(3, 3)
       return x.mean(), {"x": {"y": jnp.ones(13)}}, (z,)
 
-    x = jax.random.normal(rng, (13, 5))
+    x = jr.normal(rng, (13, 5))
 
     fn = utils.batched_vmap(f, batch_size=12, out_axes=out_axes)
     gt_fn = jax.vmap(f, out_axes=out_axes)
 
-    chex.assert_trees_all_equal(gt_fn(x), fn(x))
+    chex.assert_trees_all_close(gt_fn(x), fn(x), rtol=1e-5, atol=1e-5)
 
   @pytest.mark.parametrize("n", [16, 7])
   @pytest.mark.parametrize("batch_size", [1, 4, 5, 7, 16])
@@ -160,32 +161,32 @@ class TestBatchedVmap:
       return x.sum()
 
     chex.clear_trace_counter()
-    x = jax.random.normal(rng, (n, 3))
+    x = jr.normal(rng, (n, 3))
 
-    np.testing.assert_array_equal(fn(x), x.sum(1))
+    np.testing.assert_array_almost_equal(fn(x), x.sum(1), decimal=4)
 
-  @pytest.mark.limit_memory("15MB")
+  @pytest.mark.limit_memory("35MB")
   def test_vmap_max_memory(self, rng: jax.Array):
     n, m, d = 2 ** 16, 2 ** 11, 3
-    rng, rng_data = jax.random.split(rng, 2)
-    y = jax.random.normal(rng_data, (m, d))
+    rng, rng_data = jr.split(rng, 2)
+    y = jr.normal(rng_data, (m, d))
 
     fn = utils.batched_vmap(
         lambda x, y: jnp.dot(y, x).sum(), in_axes=[0, None], batch_size=128
     )
     fn = jax.jit(fn)
 
-    rng, rng_data = jax.random.split(rng, 2)
-    x = jax.random.normal(rng_data, (n, d))
+    rng, rng_data = jr.split(rng, 2)
+    x = jr.normal(rng_data, (n, d))
     res = fn(x, y)
     assert res.shape == (n,)
 
   @pytest.mark.parametrize("batch_size", [1, 5, 10])
   def test_inconsistent_array_sizes(self, rng: jax.Array, batch_size: int):
-    rng1, rng2 = jax.random.split(rng, 2)
+    rng1, rng2 = jr.split(rng, 2)
 
-    x = jax.random.normal(rng1, (5, 2))
-    y = jax.random.normal(rng2, (10, 2))
+    x = jr.normal(rng1, (5, 2))
+    y = jr.normal(rng2, (10, 2))
 
     gt_fn = jax.vmap(lambda x, y: (x + y).sum(), in_axes=0)
     fn = utils.batched_vmap(

@@ -18,12 +18,14 @@ import pytest
 import jax
 import numpy as np
 
+from flax import nnx
+
 from ott import datasets
 from ott.neural.methods import neuraldual
 from ott.neural.networks import icnn, potentials
 from ott.neural.networks.layers import conjugate
 
-ModelPair_t = Tuple[potentials.BasePotential, potentials.BasePotential]
+ModelPair_t = Tuple[nnx.Module, nnx.Module]
 DatasetPair_t = Tuple[datasets.Dataset, datasets.Dataset]
 
 
@@ -41,16 +43,20 @@ def ds(rng: jax.Array, request: Tuple[str, str]) -> DatasetPair_t:
 def neural_models(request: str) -> ModelPair_t:
   if request.param == "icnns":
     return (
-        icnn.ICNN(dim_data=2,
-                  dim_hidden=[32]), icnn.ICNN(dim_data=2, dim_hidden=[32])
+        icnn.ICNN(input_dim=2, dim_hidden=[32], rngs=nnx.Rngs(0)),
+        icnn.ICNN(input_dim=2, dim_hidden=[32], rngs=nnx.Rngs(1))
     )
   if request.param == "mlps":
-    return potentials.PotentialMLP(dim_hidden=[32]
-                                  ), potentials.PotentialMLP(dim_hidden=[32]),
+    return (
+        potentials.PotentialMLP(dim_hidden=[32], input_dim=2, rngs=nnx.Rngs(0)),
+        potentials.PotentialMLP(dim_hidden=[32], input_dim=2, rngs=nnx.Rngs(1)),
+    )
   if request.param == "mlps-grad":
     return (
-        potentials.PotentialMLP(dim_hidden=[32]),
-        potentials.PotentialMLP(is_potential=False, dim_hidden=[128])
+        potentials.PotentialMLP(dim_hidden=[32], input_dim=2, rngs=nnx.Rngs(0)),
+        potentials.PotentialMLP(
+            dim_hidden=[128], input_dim=2, is_potential=False, rngs=nnx.Rngs(1)
+        ),
     )
   raise ValueError(f"Invalid request: {request.param}")
 
@@ -58,9 +64,9 @@ def neural_models(request: str) -> ModelPair_t:
 class TestNeuralDual:
 
   @pytest.mark.fast.with_args(
-      "back_and_forth,test_gaussian_init,amortization_loss,conjugate_solver", (
-          (True, True, "objective", conjugate.DEFAULT_CONJUGATE_SOLVER),
-          (False, False, "regression", None),
+      "back_and_forth,amortization_loss,conjugate_solver", (
+          (True, "objective", conjugate.DEFAULT_CONJUGATE_SOLVER),
+          (False, "regression", None),
       ),
       only_fast=0
   )
@@ -70,7 +76,6 @@ class TestNeuralDual:
       neural_models: ModelPair_t,
       back_and_forth: bool,
       amortization_loss: str,
-      test_gaussian_init: bool,
       conjugate_solver: Optional[conjugate.FenchelConjugateSolver],
   ):
     """Tests convergence of learning the Kantorovich dual using ICNNs."""
@@ -85,25 +90,7 @@ class TestNeuralDual:
 
     train_dataset, valid_dataset = ds
 
-    if test_gaussian_init:
-      neural_f = icnn.ICNN(
-          dim_data=2,
-          dim_hidden=[32],
-          gaussian_map_samples=[
-              next(train_dataset.source_iter),
-              next(train_dataset.target_iter)
-          ]
-      )
-      neural_g = icnn.ICNN(
-          dim_data=2,
-          dim_hidden=[32],
-          gaussian_map_samples=[
-              next(train_dataset.target_iter),
-              next(train_dataset.source_iter)
-          ]
-      )
-    else:
-      neural_f, neural_g = neural_models
+    neural_f, neural_g = neural_models
 
     # initialize neural dual
     neural_dual_solver = neuraldual.W2NeuralDual(
@@ -117,7 +104,7 @@ class TestNeuralDual:
         amortization_loss=amortization_loss,
         conjugate_solver=conjugate_solver,
     )
-    neural_dual, logs = neural_dual_solver(*train_dataset, *valid_dataset)
+    _, logs = neural_dual_solver(*train_dataset, *valid_dataset)
 
     # check if training loss of f is increasing and g is decreasing
     assert increasing(logs["train_logs"]["loss_f"])

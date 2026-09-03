@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,20 +22,16 @@ from typing import (
     List,
     NamedTuple,
     Optional,
+    ParamSpec,
     Tuple,
     TypeVar,
     Union,
 )
 
-try:
-  from typing import ParamSpec
-except ImportError:
-  from typing_extensions import ParamSpec
-
 import jax
+import jax._src.interpreters.batching as batching
 import jax.numpy as jnp
 import numpy as np
-from jax.interpreters import batching
 
 try:
   from tqdm import tqdm
@@ -49,7 +45,6 @@ __all__ = [
     "default_progress_fn",
     "tqdm_progress_fn",
     "batched_vmap",
-    "is_scalar",
 ]
 
 IOStatus = Tuple[np.ndarray, np.ndarray, np.ndarray, NamedTuple]
@@ -378,6 +373,19 @@ def batched_vmap(
   Returns:
     The vectorized function.
   """
+  vmapped_fun = jax.vmap(fun, in_axes=in_axes, out_axes=out_axes)
+  return _batched_map(
+      vmapped_fun, batch_size=batch_size, in_axes=in_axes, out_axes=out_axes
+  )
+
+
+def _batched_map(
+    fun: Callable[P, R],
+    *,
+    batch_size: int,
+    in_axes: Optional[Union[int, Sequence[int], Any]] = 0,
+    out_axes: Any = 0,
+) -> Callable[P, R]:
 
   def unbatch(axis: int, x: jnp.ndarray) -> jnp.ndarray:
     x = jnp.moveaxis(x, 0, axis)
@@ -407,7 +415,7 @@ def batched_vmap(
       )
       batched = jax.tree.map(unbatch, out_axes_, batched)
     if has_remainder:
-      remainder = vmapped_fun(*remainder, **kwargs)
+      remainder = fun(*remainder, **kwargs)
 
     if has_batched and has_remainder:
       return jax.tree.map(concat, out_axes_, batched, remainder)
@@ -419,17 +427,6 @@ def batched_vmap(
   if isinstance(in_axes, list):
     in_axes = tuple(in_axes)
 
-  vmapped_fun = jax.vmap(fun, in_axes=in_axes, out_axes=out_axes)
-  batched_fun = _apply_scan(vmapped_fun, in_axes=in_axes)
+  batched_fun = _apply_scan(fun, in_axes=in_axes)
 
   return wrapper
-
-
-# TODO(michalk8): remove when `jax>=0.4.31`
-def is_scalar(x: Any) -> bool:  # noqa: D103
-  if (
-      isinstance(x, (np.ndarray, jax.Array)) or hasattr(x, "__jax_array__") or
-      np.isscalar(x)
-  ):
-    return jnp.asarray(x).ndim == 0
-  return False

@@ -16,6 +16,7 @@ Sinkhorn Solvers
     :toctree: _autosummary
 
     solve
+    solve_semidiscrete
     sinkhorn.Sinkhorn
     sinkhorn.SinkhornState
     sinkhorn.SinkhornOutput
@@ -43,6 +44,17 @@ Univariate Solvers
     univariate.quantile_solver
     univariate.north_west_solver
     univariate.UnivariateOutput
+
+Semidiscrete Solvers
+--------------------
+.. autosummary::
+    :toctree: _autosummary
+
+    semidiscrete.SemidiscreteSolver
+    semidiscrete.SemidiscreteState
+    semidiscrete.SemidiscreteOutput
+    semidiscrete.HardAssignmentOutput
+    semidiscrete.constant_epsilon_scheduler
 
 Sinkhorn Acceleration
 ---------------------

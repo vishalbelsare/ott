@@ -15,7 +15,7 @@ import pytest
 
 import jax
 import jax.numpy as jnp
-import numpy as np
+import jax.random as jr
 
 from ott.geometry import pointcloud
 from ott.initializers.linear import initializers_lr
@@ -30,22 +30,22 @@ class TestLRInitializers:
       self, rng: jax.Array, rank: int
   ):
     n, d = 27, 5
-    x = jax.random.normal(rng, (n, d))
+    x = jr.normal(rng, (n, d))
     pc = pointcloud.PointCloud(x, epsilon=0.5)
     prob = linear_problem.LinearProblem(pc)
 
     initializer = initializers_lr.GeneralizedKMeansInitializer(rank)
-    q, r, g = initializer(prob)
+    q, r, _ = initializer(prob)
 
     assert jnp.linalg.matrix_rank(q) == rank
     assert jnp.linalg.matrix_rank(r) == rank
 
-  @pytest.mark.parametrize("epsilon", [0.0, 1e-1])
-  def test_better_initialization_helps(self, rng: jax.Array, epsilon: float):
-    n, d, rank = 81, 13, 3
-    rng1, rng2 = jax.random.split(rng, 2)
-    x = jax.random.normal(rng1, (n, d))
-    y = jax.random.normal(rng2, (n, d))
+  def test_better_initialization_helps(self, rng: jax.Array):
+    n, d, rank = 81, 15, 3
+    epsilon = 1e-1
+    rng1, rng2, rng3 = jr.split(rng, 3)
+    x = jr.normal(rng1, (n, d))
+    y = jr.normal(rng2, (n, d))
     pc = pointcloud.PointCloud(x, y, epsilon=5e-1)
     prob = linear_problem.LinearProblem(pc)
 
@@ -62,13 +62,12 @@ class TestLRInitializers:
         max_iterations=10000
     )
 
-    out_random = solver_random(prob)
+    out_random = solver_random(prob, rng=rng3)
     out_init = solver_init(prob)
 
     assert out_random.converged
     assert out_init.converged
     # converged earlier
-    np.testing.assert_array_less((out_init.errors > -1).sum(),
-                                 (out_random.errors > -1).sum())
+    assert out_init.n_iters <= out_random.n_iters
     # converged to a better solution
-    np.testing.assert_array_less(out_init.reg_ot_cost, out_random.reg_ot_cost)
+    assert out_init.reg_ot_cost <= out_random.reg_ot_cost

@@ -22,7 +22,6 @@ Unregularized Optimal Transport
     :toctree: _autosummary
 
     unreg.hungarian
-    unreg.HungarianOutput
     unreg.wassdis_p
 
 
@@ -61,6 +60,13 @@ ProgOT
     progot.get_alpha_schedule
     progot.get_epsilon_schedule
 
+Conformal Prediction
+--------------------
+.. autosummary::
+    :toctree: _autosummary
+
+    conformal.OTCP
+    conformal.sobol_ball_sampler
 
 Soft Sorting Algorithms
 -----------------------
@@ -90,6 +96,8 @@ Plotting
     :toctree: _autosummary
 
     plot.Plot
+    plot.PlotMM
+    plot.transport_animation
 
 ott.tools.gaussian_mixture package
 ----------------------------------

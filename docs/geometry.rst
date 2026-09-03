@@ -48,11 +48,14 @@ Geometries
     geodesic.Geodesic
     low_rank.LRCGeometry
     low_rank.LRKGeometry
+    semidiscrete_pointcloud.SemidiscretePointCloud
     epsilon_scheduler.Epsilon
     epsilon_scheduler.DEFAULT_EPSILON_SCALE
 
 Cost Functions
 --------------
+.. module:: ott.geometry.costs
+.. currentmodule:: ott.geometry
 .. autosummary::
     :toctree: _autosummary
 
@@ -61,6 +64,7 @@ Cost Functions
     costs.SqPNorm
     costs.PNormP
     costs.SqEuclidean
+    costs.NegDotProduct
     costs.RegTICost
     costs.Euclidean
     costs.EuclideanP

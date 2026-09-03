@@ -15,7 +15,10 @@ import pytest
 
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import numpy as np
+
+from flax import nnx
 
 from ott.neural.networks import icnn
 
@@ -28,45 +31,218 @@ class TestICNN:
     n_samples, n_features = 10, 2
     dim_hidden = (64, 64)
 
-    # define icnn model
-    model = icnn.ICNN(n_features, dim_hidden=dim_hidden)
+    model = icnn.ICNN(dim_hidden, input_dim=n_features, rngs=nnx.Rngs(0))
 
-    # initialize model
-    rng1, rng2 = jax.random.split(rng, 2)
-    params = model.init(rng1, jnp.ones((1, n_features)))
+    rng1, rng2 = jr.split(rng, 2)
+    x = jr.normal(rng1, (n_samples, n_features)) * 0.1
+    y = jr.normal(rng2, (n_samples, n_features))
 
-    # check convexity
-    x = jax.random.normal(rng1, (n_samples, n_features)) * 0.1
-    y = jax.random.normal(rng2, (n_samples, n_features))
-
-    out_x = model.apply(params, x)
-    out_y = model.apply(params, y)
+    out_x = model(x)
+    out_y = model(y)
 
     out = []
     for t in jnp.linspace(0, 1):
-      out_xy = model.apply(params, t * x + (1 - t) * y)
+      out_xy = model(t * x + (1 - t) * y)
       out.append((t * out_x + (1 - t) * out_y) - out_xy)
 
     np.testing.assert_array_equal(np.array(out) >= 0.0, True)
 
   def test_icnn_hessian(self, rng: jax.Array):
     """Tests if Hessian of ICNN is positive-semidefinite."""
-
-    # define icnn model
     n_features = 2
     dim_hidden = (64, 64)
-    model = icnn.ICNN(n_features, dim_hidden=dim_hidden)
+    model = icnn.ICNN(dim_hidden, input_dim=n_features, rngs=nnx.Rngs(0))
 
-    # initialize model
-    rng1, rng2 = jax.random.split(rng)
-    params = model.init(rng1, jnp.ones((1, n_features)))
+    data = jr.normal(rng, (n_features,))
 
-    # check if the Hessian is positive-semidefinite via eigenvalues
-    data = jax.random.normal(rng2, (n_features,))
+    # Compute Hessian of scalar output
+    hessian = jax.hessian(lambda x: model(x[None]).squeeze())(data)
 
-    # add batch dimension and compute the Hessian
-    hessian = jax.hessian(lambda x: model.apply(params, x[None]))(data)
-
-    # compute the Eigenvalues
     w = jnp.linalg.eigvalsh((hessian + hessian.T) / 2.0)
     np.testing.assert_array_equal(w >= 0, True)
+
+  def test_icnn_vector_output(self, rng: jax.Array):
+    """Tests ICNN with vector output (each component convex)."""
+    n_samples, n_features, output_dim = 10, 3, 4
+    dim_hidden = (32, 32)
+
+    model = icnn.ICNN(
+        dim_hidden,
+        input_dim=n_features,
+        output_dim=output_dim,
+        rngs=nnx.Rngs(0)
+    )
+
+    x = jr.normal(rng, (n_samples, n_features))
+    out = model(x)
+    assert out.shape == (n_samples, output_dim)
+
+  def test_icnn_wx_inject_frequency(self, rng: jax.Array):
+    """Tests ICNN with wx_inject as frequency."""
+    n_features = 4
+    dim_hidden = (32, 32, 32, 32)
+
+    model = icnn.ICNN(
+        dim_hidden, input_dim=n_features, wx_inject=2, rngs=nnx.Rngs(0)
+    )
+    x = jr.normal(rng, (5, n_features))
+    out = model(x)
+    assert out.shape == (5,)
+
+  def test_icnn_pos_def_potentials(self, rng: jax.Array):
+    """Tests ICNN with PosDefPotentials enabled."""
+    n_features = 3
+    dim_hidden = (32, 32)
+
+    model = icnn.ICNN(
+        dim_hidden, input_dim=n_features, pos_def_rank=2, rngs=nnx.Rngs(0)
+    )
+    x = jr.normal(rng, (5, n_features))
+    out = model(x)
+    assert out.shape == (5,)
+
+  def test_icnn_principled_init(self, rng: jax.Array):
+    """Tests ICNN with principled initialization preserves convexity."""
+    n_samples, n_features = 10, 4
+    dim_hidden = (32, 32)
+
+    model = icnn.ICNN(
+        dim_hidden,
+        input_dim=n_features,
+        principled_init=True,
+        rngs=nnx.Rngs(0),
+    )
+
+    rng1, rng2 = jr.split(rng)
+    x = jr.normal(rng1, (n_samples, n_features)) * 0.1
+    y = jr.normal(rng2, (n_samples, n_features))
+
+    out_x = model(x)
+    out_y = model(y)
+
+    out = []
+    for t in jnp.linspace(0, 1):
+      out_xy = model(t * x + (1 - t) * y)
+      out.append((t * out_x + (1 - t) * out_y) - out_xy)
+
+    np.testing.assert_array_equal(np.array(out) >= -1e-5, True)
+
+  @pytest.mark.parametrize("mode", ["softmax", "sinkhorn"])
+  def test_icnn_stochastic_weights(self, rng: jax.Array, mode: str):
+    """Tests ICNN with softmax/sinkhorn weight normalization."""
+    n_samples, n_features = 10, 4
+    dim_hidden = (32, 32)
+
+    kwargs = {
+        "use_softmax": mode == "softmax",
+        "use_sinkhorn": mode == "sinkhorn",
+    }
+    model = icnn.ICNN(
+        dim_hidden, input_dim=n_features, rngs=nnx.Rngs(0), **kwargs
+    )
+
+    rng1, rng2 = jr.split(rng)
+    x = jr.normal(rng1, (n_samples, n_features)) * 0.1
+    y = jr.normal(rng2, (n_samples, n_features))
+
+    out_x = model(x)
+    out_y = model(y)
+    assert out_x.shape == (n_samples,)
+
+    # Verify convexity
+    out = []
+    for t in jnp.linspace(0, 1):
+      out_xy = model(t * x + (1 - t) * y)
+      out.append((t * out_x + (1 - t) * out_y) - out_xy)
+
+    np.testing.assert_array_equal(np.array(out) >= -1e-5, True)
+
+  def test_icnn_gradient_shape(self, rng: jax.Array):
+    """Tests ICNN.gradient returns the right shape for scalar/vector output."""
+    n_samples, n_features = 7, 4
+    dim_hidden = (32, 32)
+
+    scalar_model = icnn.ICNN(dim_hidden, input_dim=n_features, rngs=nnx.Rngs(0))
+    x = jr.normal(rng, (n_samples, n_features))
+    grad = scalar_model.gradient(x)
+    assert grad.shape == (n_samples, n_features)
+
+    output_dim = 3
+    vector_model = icnn.ICNN(
+        dim_hidden,
+        input_dim=n_features,
+        output_dim=output_dim,
+        rngs=nnx.Rngs(0),
+    )
+    jac = vector_model.gradient(x)
+    assert jac.shape == (n_samples, output_dim, n_features)
+
+
+@pytest.mark.fast()
+class TestKeyNet:
+
+  def test_keynet_output_shape(self, rng: jax.Array):
+    """Tests KeyNet output dimensions."""
+    n_samples, n_features = 10, 4
+    dim_hidden = (32, 32)
+
+    model = icnn.KeyNet(dim_hidden, input_dim=n_features, rngs=nnx.Rngs(0))
+    x = jr.normal(rng, (n_samples, n_features))
+
+    # gradient returns vectors
+    grad_out = model.gradient(x)
+    assert grad_out.shape == (n_samples, n_features)
+
+    # __call__ returns scalars (dot product)
+    scalar_out = model(x)
+    assert scalar_out.shape == (n_samples,)
+
+  def test_keynet_resnet(self, rng: jax.Array):
+    """Tests KeyNet in resnet mode."""
+    n_features = 4
+    dim_hidden = (32, 32)
+
+    model = icnn.KeyNet(
+        dim_hidden, input_dim=n_features, resnet=True, rngs=nnx.Rngs(0)
+    )
+    x = jr.normal(rng, (5, n_features))
+
+    grad_out = model.gradient(x)
+    assert grad_out.shape == (5, n_features)
+
+  def test_keynet_custom_output_dim(self, rng: jax.Array):
+    batch_size, n_features = 5, 4
+    output_dim = 8
+    dim_hidden = (32, 32)
+
+    model = icnn.KeyNet(
+        dim_hidden,
+        input_dim=n_features,
+        output_dim=output_dim,
+        rngs=nnx.Rngs(0)
+    )
+    x = jr.normal(rng, (batch_size, n_features))
+
+    grad_out = model.gradient(x)
+    assert grad_out.shape == (batch_size, output_dim)
+
+  @pytest.mark.parametrize("num_outputs", [1, 5])
+  def test_keynet_num_outputs(self, rng: jax.Array, num_outputs: int):
+    batch_size, n_features = 6, 1
+    output_dim = 5
+    dim_hidden = (32, 32)
+
+    model = icnn.KeyNet(
+        dim_hidden,
+        input_dim=n_features,
+        output_dim=output_dim,
+        num_outputs=num_outputs,
+        rngs=nnx.Rngs(0),
+    )
+    x = jr.normal(rng, (batch_size, n_features))
+
+    grad_out = model.gradient(x)
+    assert grad_out.shape == (batch_size, num_outputs, output_dim)
+
+    scalar_out = model(x)
+    assert scalar_out.shape == (batch_size, num_outputs)

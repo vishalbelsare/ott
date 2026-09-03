@@ -18,6 +18,7 @@ import pytest
 
 import jax
 import jax.numpy as jnp
+import jax.random as jr
 import numpy as np
 
 from ott.geometry import costs, segment
@@ -55,11 +56,11 @@ class TestBarycenter:
       self, rng: jax.Array, rank: int, epsilon: float, init_random: bool,
       jit: bool
   ):
-    rngs = jax.random.split(rng, 20)
+    rngs = jr.split(rng, 20)
     # Sample 2 point clouds, each of size 113, the first around [0,1]^4,
     # Second around [2,3]^4.
-    y1 = jax.random.uniform(rngs[0], (self.N_POINTS, self.DIM))
-    y2 = jax.random.uniform(rngs[1], (self.N_POINTS, self.DIM)) + 2
+    y1 = jr.uniform(rngs[0], (self.N_POINTS, self.DIM))
+    y2 = jr.uniform(rngs[1], (self.N_POINTS, self.DIM)) + 2
     # Merge them
     y = jnp.concatenate((y1, y2))
 
@@ -68,7 +69,7 @@ class TestBarycenter:
     # Set weights for each segment that sum to 1.
     b = []
     for i in range(num_per_segment.shape[0]):
-      c = jax.random.uniform(rngs[i], (num_per_segment[i],))
+      c = jr.uniform(rngs[2 + i], (num_per_segment[i],))
       b.append(c / jnp.sum(c))
     b = jnp.concatenate(b, axis=0)
     # Set a barycenter problem with 8 measures, of irregular sizes.
@@ -90,6 +91,7 @@ class TestBarycenter:
       linear_solver = sinkhorn_lr.LRSinkhorn(rank=rank, threshold=threshold)
     else:
       linear_solver = sinkhorn.Sinkhorn(threshold=threshold)
+
     solver = cb.FreeWassersteinBarycenter(linear_solver)
     if jit:
       solver = jax.jit(solver, static_argnames="bar_size")
@@ -102,7 +104,7 @@ class TestBarycenter:
     # initialization consists in selecting randomly points in the y's.
     if init_random:
       # choose points randomly in area relevant to the problem.
-      x_init = 3 * jax.random.uniform(rngs[-1], (bar_size, self.DIM))
+      x_init = 3 * jr.uniform(rngs[-1], (bar_size, self.DIM))
       out = solver(bar_prob, bar_size=bar_size, x_init=x_init)
     else:
       out = solver(bar_prob, bar_size=bar_size)
@@ -112,7 +114,7 @@ class TestBarycenter:
 
     # Check convergence by looking at cost evolution.
     c = out.costs[out.costs > -1]
-    assert jnp.isclose(c[-2], c[-1], rtol=threshold)
+    np.testing.assert_allclose(c[-2], c[-1], rtol=threshold, atol=1e-8)
 
     # Check barycenter has all points roughly in [1,2]^4.
     # (this is because sampled points were equally set in either [0,1]^4
@@ -123,6 +125,8 @@ class TestBarycenter:
   @pytest.mark.parametrize("segment_before", [False, True])
   def test_barycenter_jit(self, rng: jax.Array, segment_before: bool):
 
+    bar_size = 17
+
     @functools.partial(jax.jit, static_argnums=(2, 3))
     def barycenter(
         y: jnp.ndarray,
@@ -131,32 +135,35 @@ class TestBarycenter:
         num_per_segment: Tuple[int, ...],
     ) -> cb.FreeBarycenterState:
       if segment_before:
-        y, b = segment.segment_point_cloud(
+        y, b, num_per_segment = segment.segment_point_cloud(
             x=y, a=b, num_per_segment=num_per_segment
         )
-        bar_prob = barycenter_problem.FreeBarycenterProblem(y, b, epsilon=1e-1)
+        bar_prob = barycenter_problem.FreeBarycenterProblem(
+            y, b, epsilon=1e-1, num_per_segment=num_per_segment
+        )
       else:
         bar_prob = barycenter_problem.FreeBarycenterProblem(
             y, b, epsilon=1e-1, num_per_segment=num_per_segment
         )
       linear_solver = sinkhorn.Sinkhorn(threshold=threshold)
       solver = cb.FreeWassersteinBarycenter(linear_solver)
-      return solver(bar_prob)
+      return solver(bar_prob, bar_size=bar_size)
 
-    rngs = jax.random.split(rng, 20)
+    rngs = jr.split(rng, 20)
     # Sample 2 point clouds, each of size 113, the first around [0,1]^4,
     # Second around [2,3]^4.
-    y1 = jax.random.uniform(rngs[0], (self.N_POINTS, self.DIM))
-    y2 = jax.random.uniform(rngs[1], (self.N_POINTS, self.DIM)) + 2
+    y1 = jr.uniform(rngs[0], (self.N_POINTS, self.DIM))
+    y2 = jr.uniform(rngs[1], (self.N_POINTS, self.DIM)) + 2
     # Merge them
     y = jnp.concatenate((y1, y2))
 
     # Define segments
     num_per_segment = (33, 29, 24, 27, 27, 31, 30, 25)
+    max_num_per_segment = max(num_per_segment)
     # Set weights for each segment that sum to 1.
     b = []
     for rng, n in zip(rngs, num_per_segment):
-      c = jax.random.uniform(rng, (n,))
+      c = jr.uniform(rng, (n,))
       b.append(c / jnp.sum(c))
     b = jnp.concatenate(b, axis=0)
 
@@ -166,13 +173,28 @@ class TestBarycenter:
     )
     # Check convergence by looking at cost evolution.
     c = out.costs[out.costs > -1]
-    assert jnp.isclose(c[-2], c[-1], rtol=threshold)
+    np.testing.assert_allclose(c[-2], c[-1], rtol=threshold, atol=1e-8)
 
     # Check barycenter has all points roughly in [1,2]^4.
     # (this is because sampled points were equally set in either [0,1]^4
     # or [2,3]^4)
     assert jnp.all(out.x.ravel() < 2.3)
     assert jnp.all(out.x.ravel() > 0.7)
+
+    # Check the output objects return the correct shapes
+    assert out.x.shape == (bar_size, self.DIM)
+    assert out.a.shape == (bar_size,)
+
+    if not segment_before:
+      for i, numps in enumerate(num_per_segment):
+        assert out.matrix_at_index(i).shape == (bar_size, numps)
+    else:
+      for i in range(0, len(num_per_segment)):
+        assert out.matrix_at_index(i).shape == (bar_size, max_num_per_segment)
+
+    assert out.all_linear_solvers_converged
+    # Check the costs vector is non-increasing
+    assert jnp.all(jnp.diff(out.costs_along_iterations) <= 0.0)
 
   @pytest.mark.fast()
   def test_bures_barycenter(
@@ -216,7 +238,7 @@ class TestBarycenter:
 
     x_init = means_and_covs_to_x(x_init_means, x_init_covs, dimension)
 
-    seg_y, seg_b = segment.segment_point_cloud(
+    seg_y, seg_b, _ = segment.segment_point_cloud(
         x=y,
         a=b,
         num_segments=num_measures,
@@ -224,23 +246,23 @@ class TestBarycenter:
         num_per_segment=(num_components, num_components),
         padding_vector=bures_cost._padder(y.shape[1]),
     )
-    bar_p = barycenter_problem.FreeBarycenterProblem(
+    bar_prob = barycenter_problem.FreeBarycenterProblem(
         seg_y,
         seg_b,
         weights=barycentric_weights,
         cost_fn=bures_cost,
         epsilon=epsilon
     )
-    assert bar_p.num_measures == seg_y.shape[0]
-    assert bar_p.max_measure_size == seg_y.shape[1]
-    assert bar_p.ndim == seg_y.shape[2]
+    assert bar_prob.num_measures == seg_y.shape[0]
+    assert bar_prob.max_measure_size == seg_y.shape[1]
+    assert bar_prob.ndim == seg_y.shape[2]
 
     linear_solver = sinkhorn.Sinkhorn(lse_mode=lse_mode)
     solver = cb.FreeWassersteinBarycenter(linear_solver)
     if jit:
       solver = jax.jit(solver, static_argnames="bar_size")
 
-    out = solver(bar_p, bar_size=bar_size, x_init=x_init)
+    out = solver(bar_prob, bar_size=bar_size, x_init=x_init)
     barycenter = out.x
 
     means_bary, covs_bary = costs.x_to_means_and_covs(barycenter, dimension)
@@ -262,7 +284,7 @@ class TestBarycenter:
 
     np.testing.assert_allclose(
         covs_bary,
-        jnp.array([sigma * jnp.eye(dimension) for i in range(bar_size)]),
+        jnp.array([sigma * jnp.eye(dimension) for _ in range(bar_size)]),
         rtol=1e-5,
         atol=1e-5
     )
@@ -285,26 +307,24 @@ class TestBarycenter:
     b_cost = costs.Bures(dimension=dim)
 
     # keys for random number generation
-    rngs = jax.random.split(rng, num=4)
+    rngs = jr.split(rng, num=4)
 
     # test for non-uniform barycentric weights
-    barycentric_weights = jax.random.dirichlet(
+    barycentric_weights = jr.dirichlet(
         rngs[0], alpha=jnp.ones(num_measures) * alpha
     )
 
     ridges = jnp.array([jnp.ones(dim), 5 * jnp.ones(dim)])
     stdev_means = 0.1 * jnp.mean(ridges, axis=1)
-    stdev_covs = jax.random.uniform(
+    stdev_covs = jr.uniform(
         rngs[1], shape=(num_measures,), minval=0.0, maxval=10.0
     )
 
-    seeds = jax.random.randint(
-        rngs[2], shape=(num_measures,), minval=0, maxval=100
-    )
+    seeds = jr.randint(rngs[2], shape=(num_measures,), minval=0, maxval=100)
 
     gmm_generators = [
         gaussian_mixture.GaussianMixture.from_random(
-            jax.random.key(seeds[i]),
+            jr.key(seeds[i]),
             n_components=n_components[i],
             n_dimensions=dim,
             stdev_cov=stdev_covs[i],
@@ -339,7 +359,7 @@ class TestBarycenter:
 
     # test second interface for segmentation
     seg_ids = jnp.repeat(jnp.arange(num_measures), n_components)
-    bar_p = barycenter_problem.FreeBarycenterProblem(
+    bar_prob = barycenter_problem.FreeBarycenterProblem(
         y=ys,
         b=bs,
         weights=barycentric_weights,
@@ -349,9 +369,9 @@ class TestBarycenter:
         max_measure_size=max_measure_size,
         segment_ids=seg_ids,
     )
-    assert bar_p.max_measure_size == 4
-    assert bar_p.num_measures == num_measures
-    assert bar_p.ndim == ys.shape[-1]
+    assert bar_prob.max_measure_size == 4
+    assert bar_prob.num_measures == num_measures
+    assert bar_prob.ndim == ys.shape[-1]
 
     linear_solver = sinkhorn.Sinkhorn(lse_mode=True)
     solver = cb.FreeWassersteinBarycenter(linear_solver)
@@ -359,7 +379,7 @@ class TestBarycenter:
       solver = jax.jit(solver, static_argnames="bar_size")
 
     # Compute the barycenter.
-    out = solver(bar_p, bar_size=bar_size, x_init=x_init)
+    out = solver(bar_prob, bar_size=bar_size, x_init=x_init)
     barycenter = out.x
 
     means_bary, covs_bary = costs.x_to_means_and_covs(barycenter, dim)

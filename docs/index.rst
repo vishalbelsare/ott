@@ -8,21 +8,34 @@ Introduction
 ``OTT`` is a `JAX <https://jax.readthedocs.io/en/latest/>`_ package that bundles
 a few utilities to compute, and differentiate as needed, the solution to optimal
 transport (OT) problems, taken in a fairly wide sense. For instance, ``OTT`` can
-of course compute Wasserstein (or Gromov-Wasserstein) distances between weighted
-clouds of points (or histograms) in a wide variety of scenarios, but also
-estimate Monge maps, Wasserstein barycenters, and help with simpler tasks such
-as differentiable approximations to ranking or even clustering.
+compute the :term:`Wasserstein distance`
+(or :term:`Gromov-Wasserstein distance`) between weighted point clouds
+(or histograms) in a wide variety of scenarios,
+but also estimate a :term:`Monge map`, :term:`Wasserstein barycenter`, or even
+help with simpler tasks such as differentiable approximations to ranking or
+clustering.
 
 To achieve this, ``OTT`` rests on two families of tools:
 
 - the first family consists in *discrete* solvers computing transport between
-  point clouds, using the Sinkhorn :cite:`cuturi:13` and low-rank Sinkhorn
-  :cite:`scetbon:21` algorithms, and moving up towards Gromov-Wasserstein
-  :cite:`memoli:11,peyre:16`;
-- the second family consists in *continuous* solvers, using suitable neural
-  architectures such as an MLP or input-convex neural network
-  :cite:`amos:17` coupled with SGD-like estimators
-  :cite:`makkuva:20,korotin:21,amos:23`.
+  two families of points or histograms using e.g. the :term:`Sinkhorn algorithm`
+  :cite:`cuturi:13` or low-rank solvers :cite:`scetbon:21`, with further
+  extensions to more advanced scenarios such as the
+  :term:`Gromov-Wasserstein problem` :cite:`memoli:11,peyre:16`;
+- the second family consists in *continuous* solvers, whose goal is to output,
+  given two point cloud samples, a *function* that is an approximate
+  :term:`Monge map`, a :term:`transport map` that can map efficiently the first
+  measure to the second. Such functions can be recovered using directly tools
+  above, notably the family of :term:`entropic map` approximations. Such maps
+  can also be parameterized as neural architectures such as an MLP or as
+  gradients of :term:`input convex neural network` :cite:`amos:17`, trained with
+  advanced SGD approaches :cite:`makkuva:20,korotin:21,amos:23`. Such functions
+  can also be parameterized as Neural ODEs, where to an input source point is
+  associated the end-result of a path integral with a time-parameterized
+  velocity field. Such velocity fields can be parameterized as neural networks
+  and learned from data, using the framework of flow matching
+  :cite:`lipman:22,albergo:23` augmented with OT couplings for noise/data
+  :cite:`pooladian:23,tong:23,zhang:25,mousavi:25`.
 
 Installation
 ------------
@@ -50,15 +63,17 @@ Design Choices
 
 - Take advantage whenever possible of JAX features, such as
   `just-in-time (JIT) compilation`_, `auto-vectorization (VMAP)`_ and both
-  `automatic`_ but most importantly `implicit`_ differentiation.
-- Split geometry from OT solvers in the discrete case: We argue that there
-  should be one, and one implementation only, of every major OT algorithm
-  (Sinkhorn, Gromov-Wasserstein, barycenters, etc...), regardless of the
-  geometric setup that is considered. To give a concrete example, any
+  `automatic`_ and `implicit`_ differentiation.
+- Split geometry from OT solvers in the discrete case: you will find one, and
+  one implementation only, of every major OT algorithm
+  (Sinkhorn, Gromov-Wasserstein, barycenters, etc...), that are all agnostic to
   speedups one may benefit from by using a specific cost (e.g. Sinkhorn being
-  faster when run on a separable cost on histograms supported on a separable
-  grid :cite:`solomon:15`) should not require a separate reimplementation
-  of a Sinkhorn routine.
+  the geometric (i.e. the cost function) setup. To give a concrete example, if
+  the inner operations in the :term:`Sinkhorn algorithm` can be run more
+  efficiently (because e.g. the cost function is low-rank, or the cost is a
+  separable function for points supported on on a separable grid
+  :cite:`solomon:15`), this should not trigger a separate reimplementation
+  of the :term:`Sinkhorn algorithm`.
 - As a consequence, and to minimize code copy/pasting, use as often as possible
   object hierarchies, and interleave outer solvers (such as quadratic,
   aka Gromov-Wasserstein solvers) with inner solvers (e.g., low-rank Sinkhorn).
@@ -72,18 +87,22 @@ Packages
 .. module:: ott
 
 - :mod:`ott.geometry` contains classes that instantiate the ground *cost matrix*
-  used to specify OT problems. Here cost matrix can be understood in
-  a literal (by actually passing a matrix) or abstract sense (by passing
-  information that is sufficient to recreate that matrix, apply all or parts
-  of it, or apply its kernel). A typical example in the latter case arises
-  when comparing *two point clouds*, paired with a *cost function*. Geometry
-  objects are used to describe OT *problems*, solved next by *solvers*.
-- :mod:`ott.problems` are used to describe linear, quadratic or barycenter OT
+  used to specify a :term:`Kantorovich problem`. Here cost matrix can be
+  both understood in a literal (by instantiating a matrix) or abstract (by
+  storing information that is sufficient to recreate that matrix, apply all or
+  parts of it, or apply its kernel) sense. An important case is handled by the
+  :class:`~ott.geometry.pointcloud.PointCloud` class which specifies
+  *two point clouds*, paired with a *cost function* (to be chosen within
+  :mod:`ott.geometry.costs`). Geometry objects are used to describe
+  OT *problems*, solved next by *solvers*.
+- :mod:`ott.problems` are used to describe the interactions between multiple
+  measures, to define linear (a.k.a. :term:`Kantorovich problem`), quadratic
+  (a.k.a. :term:`Gromov-Wasserstein problem`) or :term:`Wasserstein barycenter`
   problems.
 - :mod:`ott.solvers` solve a problem instantiated with :mod:`ott.problems` using
-  one of the implemented techniques.
-- :mod:`ott.initializers` implement simple strategies to initialize solvers.
-  When the problems are solved with a convex solver, such as a
+  one among many implemented approaches.
+- :mod:`ott.initializers` implement simple strategies to initialize the solvers
+  above. When the problems are solved with a convex solver, such as a
   :class:`~ott.problems.linear.linear_problem.LinearProblem` solved with a
   :class:`~ott.solvers.linear.sinkhorn.Sinkhorn` solver, the resolution of OT
   solvers, then this initialization is mostly useful to speed up convergences.
@@ -95,16 +114,23 @@ Packages
   still prove useful for users. This includes at the moment the
   :class:`~ott.solvers.linear.mmsinkhorn.MMSinkhorn` solver class to compute an
   optimal :term:`multimarginal coupling`
-- :mod:`ott.neural` provides tools to parameterize and optimal
-  :term:`transport map`, :term:`coupling` or conditional probabilities as
-  neural networks.
-- :mod:`ott.tools` provides an interface to exploit OT solutions, as produced by
+- :mod:`ott.neural` provides tools to parameterize and compute an optimal
+  :term:`transport map` as a neural network. Such networks can be parameterized
+  as an :term:`input convex neural network`, and trained to approximate the
+  :term:`Brenier potential` between two measures. Alternatively, one can
+  parameterize that map as a neural ODE, using a time-dependent velocity field
+  trained with :mod:`~ott.neural.methods.flow_matching`
+  :cite:`lipman:22,albergo:23` using independent couplings or more advanced OT
+  couplings :cite:`pooladian:23,tong:23,zhang:25,mousavi:25`.
+- :mod:`ott.tools` provides an interface to exploit OT solutions produced by
   solvers from the :mod:`ott.solvers` module. Such tasks include computing
   approximations to Wasserstein distances :cite:`genevay:18,sejourne:19`,
   approximating OT between GMMs, or computing differentiable sort and quantile
-  operations :cite:`cuturi:19`.
+  operations :cite:`cuturi:19`. That module also provides plotting tools to
+  display OT solutions.
 - :mod:`ott.math` holds low-level miscellaneous mathematical primitives, such as
-  an implementation of the matrix square-root.
+  an implementation of the matrix square-root, or the
+  :term:`Legendre transform`.
 - :mod:`ott.utils` provides miscellaneous helper functions.
 
 .. toctree::
@@ -136,7 +162,7 @@ Packages
     bibliography
     contributing
 
-.. |Downloads| image:: https://static.pepy.tech/badge/ott-jax
+.. |Downloads| image:: https://static.pepy.tech/personalized-badge/ott-jax?period=total&units=INTERNATIONAL_SYSTEM&left_color=GREY&right_color=BLUE&left_text=downloads
     :target: https://pypi.org/project/ott-jax/
     :alt: Documentation
 
@@ -144,8 +170,8 @@ Packages
     :target: https://github.com/ott-jax/ott/actions/workflows/tests.yml
     :alt: Documentation
 
-.. |Docs| image:: https://img.shields.io/readthedocs/ott-jax/latest
-    :target: https://ott-jax.readthedocs.io/en/latest/
+.. |Docs| image:: https://img.shields.io/readthedocs/ott-jax
+    :target: https://ott-jax.readthedocs.io
     :alt: Documentation
 
 .. |Coverage| image:: https://img.shields.io/codecov/c/github/ott-jax/ott/main
@@ -153,7 +179,7 @@ Packages
     :alt: Coverage
 
 .. _Just-in-time (JIT) compilation: https://jax.readthedocs.io/en/latest/jax.html#just-in-time-compilation-jit
-.. _auto-vectorization (VMAP): https://jax.readthedocs.io/en/latest/jax.html#vectorization-vmap
+.. _auto-vectorization (VMAP): https://docs.jax.dev/en/latest/_autosummary/jax.vmap.html#jax.vmap
 .. _automatic: https://jax.readthedocs.io/en/latest/jax.html#automatic-differentiation
 .. _implicit: https://jax.readthedocs.io/en/latest/_autosummary/jax.custom_jvp.html#jax.custom_jvp
-.. _conda: https://anaconda.org/conda-forge/ott-jax
+.. _conda: https://anaconda.org/channels/conda-forge/packages/ott-jax/overview

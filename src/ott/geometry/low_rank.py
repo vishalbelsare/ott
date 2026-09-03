@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -112,9 +112,15 @@ class LRCGeometry(geometry.Geometry):
       return 1.0 / (mean + self._bias)
     if self._scale_cost == "max_cost":
       return 1.0 / self._max_cost_matrix
-    if utils.is_scalar(self._scale_cost):
+    if jnp.isscalar(self._scale_cost):
       return 1.0 / self._scale_cost
     raise ValueError(f"Scaling {self._scale_cost} not implemented.")
+
+  @property
+  def diag_cost(self) -> jnp.ndarray:
+    """Diagonal of the cost matrix."""
+    assert self.is_square, "Diagonal cost only available for square geometries."
+    return jnp.sum(self._cost_1 * self._cost_2, axis=-1)
 
   def apply_square_cost(self, arr: jnp.ndarray, axis: int = 0) -> jnp.ndarray:
     """Apply elementwise-square of cost matrix to array (vector or matrix)."""
@@ -288,6 +294,8 @@ class LRKGeometry(geometry.Geometry):
     Returns:
       Low-rank kernel geometry.
     """
+    # `k1 @ k2.T` only approximates the kernel if both clouds are
+    # lifted by the same random features, hence the cloned keys below
     rng = utils.default_prng_key(rng)
     if kernel == "gaussian":
       r = jnp.maximum(
@@ -295,11 +303,11 @@ class LRKGeometry(geometry.Geometry):
           jnp.linalg.norm(y, axis=-1).max()
       )
       k1 = _gaussian_kernel(rng, x, rank, eps=std, R=r)
-      k2 = _gaussian_kernel(rng, y, rank, eps=std, R=r)
+      k2 = _gaussian_kernel(jax.random.clone(rng), y, rank, eps=std, R=r)
       eps = std
     elif kernel == "arccos":
       k1 = _arccos_kernel(rng, x, rank, n=n, std=std)
-      k2 = _arccos_kernel(rng, y, rank, n=n, std=std)
+      k2 = _arccos_kernel(jax.random.clone(rng), y, rank, n=n, std=std)
       eps = 1.0
     else:
       raise NotImplementedError(kernel)

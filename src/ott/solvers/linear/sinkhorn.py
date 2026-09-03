@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -475,12 +475,29 @@ class SinkhornOutput(NamedTuple):
     """Return reg-OT cost for matrix, evaluated at other cost matrix."""
     return (
         jnp.sum(self.matrix * other_geom.cost_matrix) -
-        self.geom.epsilon * jnp.sum(jax.scipy.special.entr(self.matrix))
+        self.geom.epsilon * jnp.sum(jsp.special.entr(self.matrix))
     )
 
-  def to_dual_potentials(self) -> potentials.EntropicPotentials:
-    """Return the entropic map estimator."""
-    return potentials.EntropicPotentials(self.f, self.g, self.ot_prob)
+  def to_dual_potentials(
+      self, epsilon: Optional[float] = None
+  ) -> potentials.DualPotentials:
+    """Compute dual potential functions.
+
+    Args:
+      epsilon: Epsilon regularization. If :obj:`None`, use the one stored
+        in the :attr:`geom`.
+
+    Returns:
+      The dual potentials :math:`f` and :math:`g`.
+    """
+    f_fn = self.ot_prob.potential_fn_from_dual_vec(
+        self.g, epsilon=epsilon, axis=1
+    )
+    g_fn = self.ot_prob.potential_fn_from_dual_vec(
+        self.f, epsilon=epsilon, axis=0
+    )
+    cost_fn = self.geom.cost_fn
+    return potentials.DualPotentials(f_fn, g_fn, cost_fn=cost_fn)
 
   @property
   def f(self) -> jnp.ndarray:
@@ -491,6 +508,34 @@ class SinkhornOutput(NamedTuple):
   def g(self) -> jnp.ndarray:
     """The second dual potential."""
     return self.potentials[1]
+
+  @property
+  def entropy(self) -> jnp.ndarray:
+    """Entropy of the coupling."""
+    marginal_a = self.marginal(1)
+    marginal_b = self.marginal(0)
+    safe_f = jnp.where(jnp.isfinite(self.f), self.f, 0.0)
+    safe_g = jnp.where(jnp.isfinite(self.g), self.g, 0.0)
+    return (
+        self.primal_cost - jnp.dot(safe_f, marginal_a) -
+        jnp.dot(safe_g, marginal_b)
+    ) / self.geom.epsilon
+
+  @property
+  def normalized_entropy(self) -> jnp.ndarray:
+    """Renormalized entropy of coupling when the problem is assignment."""
+    is_assign = self.ot_prob.is_assignment
+    assert is_assign, "Normalized entropy only valid for assignment problem."
+    return self.entropy / jnp.log(self.geom.shape[0]) - 1.0
+
+  @property
+  def diag(self) -> jnp.ndarray:
+    """Diagonal of the transport matrix."""
+    assert self.ot_prob.geom.is_square, (
+        "Problem must be square for ", "transport  matrix to have a diag."
+    )
+    diag = self.ot_prob.geom.diag_cost
+    return jnp.exp((-diag + self.f + self.g) / self.geom.epsilon)
 
 
 @jax.tree_util.register_pytree_node_class
@@ -1082,7 +1127,8 @@ def _iterations_implicit_bwd(res, gr: SinkhornOutput):
   out = solver.implicit_diff.gradient(
       ot_prob, f, g, solver.lse_mode, gr.potentials
   )
-  return *out, None, None
+  return out[0], jax.tree.map(jnp.zeros_like, solver
+                             ), jax.tree.map(jnp.zeros_like, gr.potentials)
 
 
 # sets threshold, norm_errors, geom, a and b to be differentiable, as those are

@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -85,6 +85,15 @@ autosummary_generate = True
 autodoc_typehints = "description"
 always_document_param_types = True
 
+# Suppress warnings from unresolvable forward references in type annotations
+# (e.g., chex.ArrayTree leaking through flax/optax signatures) and from
+# jax.custom_jvp/custom_vjp decorated functions that sphinx can't introspect.
+suppress_warnings = [
+    "sphinx_autodoc_typehints.forward_reference",
+    "autodoc",
+    "autosummary",
+]
+
 # myst-nb
 myst_heading_anchors = 2
 nb_execution_mode = "off"
@@ -132,6 +141,7 @@ spelling_filters = [
 # linkcheck
 linkcheck_ignore = [
     # 403 Client Error
+    "https://doi.org/10.1561/2200000073",
     "https://doi.org/10.1089/cmb.2021.0446",
     "https://www.jstor.org/stable/3647580",
     "https://doi.org/10.1137/19M1301047",
@@ -141,8 +151,10 @@ linkcheck_ignore = [
     "https://doi.org/10.1145/2516971.2516977",
     "https://doi.org/10.1145/2766963",
     "https://keras.io/examples/nlp/pretrained_word_embeddings/",
-    "https://proceedings.neurips.cc/",
     "https://www.gnu.org/software/gsl/doc/html/statistics.html#weighted-samples",
+    "https://doi.org/10.3390/a13090212",
+    "https://doi.org/10.3390/a14050143",
+    "https://www.mdpi.com/1999-4893/13/9/212",
 ]
 linkcheck_report_timeouts_as_broken = False
 
@@ -170,8 +182,8 @@ html_theme_options = {
     "path_to_docs": "docs/",
     "use_repository_button": True,
     "use_fullscreen_button": False,
-    "pygment_light_style": "tango",
-    "pygment_dark_style": "monokai",
+    "pygments_light_style": "tango",
+    "pygments_dark_style": "monokai",
     "launch_buttons": {
         "colab_url": "https://colab.research.google.com",
         "binderhub_url": "https://mybinder.org",
@@ -181,11 +193,17 @@ html_theme_options = {
 
 
 class ChexFilter(logging.Filter):
-  """Filter warning related to :class:`chex.ArrayTree` missing link."""
+  """Filter known warnings from autodoc type resolution."""
+
+  _SUPPRESS = [
+      "name 'ArrayTree' is not defined",
+      "failed to import object",
+      "list assignment index out of range",
+  ]
 
   def filter(self, record: logging.LogRecord) -> bool:
     msg = record.getMessage()
-    return "name 'ArrayTree' is not defined" not in msg
+    return not any(s in msg for s in self._SUPPRESS)
 
 
 class SpellingAutosummaryFilter(logging.Filter):
@@ -211,9 +229,14 @@ class SpellingAutosummaryFilter(logging.Filter):
     return "autosummary" not in msg and "misspelled words" not in msg
 
 
-sphinx_logging.getLogger("sphinx_autodoc_typehints").logger.addFilter(
-    ChexFilter()
-)
+_chex_filter = ChexFilter()
+for _name in (
+    "sphinx_autodoc_typehints",
+    "sphinx.ext.autodoc",
+    "sphinx.ext.autosummary",
+    "sphinx",
+):
+  sphinx_logging.getLogger(_name).logger.addFilter(_chex_filter)
 
 sphinx_logging.getLogger("sphinxcontrib.spelling.builder").logger.addFilter(
     SpellingAutosummaryFilter()

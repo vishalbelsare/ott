@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -22,21 +22,14 @@ import jax.tree_util as jtu
 import jaxopt
 import numpy as np
 
+from ott import math as ott_math
 from ott.geometry import regularizers
 from ott.math import fixed_point_loop, matrix_square_root
 from ott.math import utils as mu
 
 __all__ = [
-    "PNormP",
-    "SqPNorm",
-    "Euclidean",
-    "SqEuclidean",
-    "RegTICost",
-    "Cosine",
-    "Arccos",
-    "Bures",
-    "UnbalancedBures",
-    "SoftDTW",
+    "PNormP", "SqPNorm", "Euclidean", "SqEuclidean", "RegTICost", "Cosine",
+    "Arccos", "Bures", "UnbalancedBures", "SoftDTW", "NegDotProduct"
 ]
 
 # TODO(michalk8): norm check
@@ -166,7 +159,6 @@ class TICost(CostFn):
   def h_transform(
       self,
       f: Func,
-      ridge: float = 1e-8,
       solver: Optional[Callable[[Func, jnp.ndarray, jnp.ndarray, Any],
                                 jnp.ndarray]] = None,
   ) -> Callable[[jnp.ndarray, Optional[jnp.ndarray], Any], float]:
@@ -188,22 +180,15 @@ class TICost(CostFn):
 
     Args:
       f: Concave function.
-      ridge: Regularizer to ensure strong convexity of the objective.
-      solver: Solver with the signature ``(func, x, x_init, **kwargs) -> sol``.
-        If :obj:`None`, use an :class:`~jaxopt.LBFGS` wrapper.
+      solver: Solver with the signature
+        ``(func, x_init, **kwargs) -> (sol, aux)``. If :obj:`None`, use
+        :func:`~ott.math.lbfgs`.
 
     Returns:
       The h-transform :math:`f_h` of :math:`f`.
     """
-
-    def lbfgs(
-        fun: Func, x: jnp.ndarray, x_init: jnp.ndarray, **kwargs: Any
-    ) -> jnp.ndarray:
-      solver = jaxopt.LBFGS(fun=fun, **kwargs)
-      return solver.run(x_init, x=x).params
-
-    def fun(z: jnp.ndarray, x: jnp.ndarray) -> float:
-      return self.h(z) + ridge * jnp.sum(z ** 2) - f(x - z)
+    if solver is None:
+      solver = ott_math.lbfgs
 
     def f_h(
         x: jnp.ndarray,
@@ -214,20 +199,21 @@ class TICost(CostFn):
 
       Args:
         x: Array of shape ``[d,]`` where to evaluate the function.
-        x_init: Initial estimate. If :obj:`None`, use ``x``.
-        kwargs: Keyword arguments for the solver.
+        x_init: Initialization for optimization. If :obj:`None`, use ``x``.
+        kwargs: Keyword arguments for the solver, e.g. maximal iterations or
+          tolerance.
 
       Returns:
-        The output :math:`f_h(x)`.
+        The :math:`h`-transform of :math:`f`, :math:`f_h(x)`.
       """
-      if x_init is None:
-        x_init = x
-      z = solver(fun, x, x_init, **kwargs)
-      z = jax.lax.stop_gradient(z)
-      return fun(z, x)
 
-    if solver is None:
-      solver = lbfgs
+      def fun(z: jnp.ndarray) -> float:
+        return self.h(z) - f(x - z)
+
+      x_init = x if x_init is None else x_init
+      z, _ = solver(fun, x_init, **kwargs)
+      z = jax.lax.stop_gradient(z)
+      return fun(z)
 
     return f_h
 
@@ -363,7 +349,7 @@ class EuclideanP(TICost):
     self.p = p
 
   def h(self, z: jnp.ndarray) -> float:  # noqa: D102
-    return mu.norm(z, ord=2) ** (self.p)
+    return mu.norm(z, ord=2) ** self.p
 
   def tree_flatten(self):  # noqa: D102
     return (), (self.p,)
@@ -372,6 +358,34 @@ class EuclideanP(TICost):
   def tree_unflatten(cls, aux_data, children):  # noqa: D102
     del children
     return cls(*aux_data)
+
+
+@jtu.register_pytree_node_class
+class NegDotProduct(CostFn):
+  r"""Negative Dot-product cost.
+
+  Should yield similar results to :class:`~ott.geometry.costs.SqEuclidean`.
+
+  .. math::
+    c(x,y) = - \langle x, y\rangle
+  """
+
+  def __call__(self, x: jnp.ndarray, y: jnp.ndarray) -> float:  # noqa: D102
+    return -jnp.vdot(x, y)
+
+  def twist_operator(self, vec, dual_vec, variable) -> jnp.ndarray:
+    """Twist operator for negative dot-product cost."""
+    del vec, variable
+    return -dual_vec
+
+  def norm(self, x: jnp.ndarray) -> jnp.ndarray:
+    """Compute squared Euclidean norm for vector. Only used for rescaling."""
+    return jnp.sum(x ** 2, axis=-1)
+
+  def barycenter(self, weights: jnp.ndarray,
+                 xs: jnp.ndarray) -> Tuple[jnp.ndarray, Any]:
+    """Output usual barycenter of vectors."""
+    return jnp.average(xs, weights=weights, axis=0), None
 
 
 @jtu.register_pytree_node_class

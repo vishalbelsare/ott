@@ -4,7 +4,7 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
@@ -98,9 +98,7 @@ class GWOutput(NamedTuple):
 
   @property
   def n_iters(self) -> int:  # noqa: D102
-    if self.errors is None:
-      return -1
-    return jnp.sum(self.errors[:, 0] != -1)
+    return jnp.sum(self.costs != -1)
 
 
 class GWState(NamedTuple):

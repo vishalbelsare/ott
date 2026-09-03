@@ -4,160 +4,439 @@
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
 #
-#   http://www.apache.org/licenses/LICENSE-2.0
+#   https://www.apache.org/licenses/LICENSE-2.0
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Callable, Optional, Sequence, Tuple, Union
+"""Input convex neural networks and KeyNet (vector-output variant)."""
+
+from typing import Callable, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 
-from flax import linen as nn
+from flax import nnx
 
-from ott.neural.networks import potentials
-from ott.neural.networks.layers import posdef
+from ott.neural.networks.layers import initializers, posdef
 
-__all__ = ["ICNN"]
+__all__ = ["ICNN", "KeyNet"]
 
-DEFAULT_KERNEL_INIT = posdef.DEFAULT_KERNEL_INIT
-DEFAULT_RECTIFIER = nn.activation.relu
-DEFAULT_ACTIVATION = nn.activation.relu
+DEFAULT_KERNEL_INIT = nnx.initializers.lecun_normal()
+DEFAULT_BIAS_INIT = nnx.initializers.zeros_init()
 
 
-class ICNN(potentials.BasePotential):
-  """Input convex neural network (ICNN).
+def _get_act_alpha(act_fn: Callable) -> float:
+  """Get the negative slope (alpha) of an activation for principled init."""
+  if act_fn is jax.nn.relu:
+    return 0.0
+  if act_fn is jax.nn.leaky_relu:
+    return 0.01
+  # For unknown activations, assume ReLU-like
+  return 0.0
 
-  Implementation of input convex neural networks as introduced in
-  :cite:`amos:17` with initialization schemes proposed by :cite:`bunne:22`,
-  and (low-rank + diagonal) quadratic on inputs at each layer, by
-  :cite:`vesseron:24`.
+
+def _normalize_wx_inject(
+    wx_inject: Union[bool, Tuple[bool, ...], int],
+    num_layers: int,
+) -> Tuple[bool, ...]:
+  """Convert wx_inject specification to a boolean tuple.
 
   Args:
-    dim_data: data dimensionality.
-    dim_hidden: sequence specifying size of hidden dimensions. The
-      output dimension of the last layer is 1 by default.
-    ranks: ranks of the matrices :math:`A_i` used as low-rank factors
-      for the quadratic potentials. If a sequence is passed, it must contain
-      ``len(dim_hidden) + 2`` elements, where the last 2 elements correspond
-      to the ranks of the final layer with dimension 1 and the potentials,
-      respectively.
-    init_fn: Initializer for the kernel weight matrices.
-      The default is :func:`~flax.linen.initializers.normal`.
-    act_fn: choice of activation function used in network architecture,
-      needs to be convex. The default is :func:`~flax.linen.activation.relu`.
-    pos_weights: Enforce positive weights with a projection.
-      If :obj:`False`, the positive weights should be enforced with clipping
-      or regularization in the loss.
-    rectifier_fn: function to ensure the non negativity of the weights.
-      The default is :func:`~flax.linen.activation.relu`.
-    gaussian_map_samples: Tuple of source and target points, used to initialize
-      the ICNN to mimic the linear Bures map that morphs the (Gaussian
-      approximation) of the input measure to that of the target measure. If
-      :obj:`None`, the identity initialization is used, and ICNN mimics half the
-      squared Euclidean norm.
+    wx_inject: Controls input re-injection pattern. Can be:
+      - ``bool``: inject at all layers (True) or none (False).
+      - ``tuple[bool, ...]``: explicit per-layer mask.
+      - ``int``: frequency (e.g., 3 means inject every 3rd layer).
+    num_layers: Number of layers after the first (len(dims) - 2).
+
+  Returns:
+    Tuple of booleans for each layer after wx0.
+  """
+  if isinstance(wx_inject, bool):
+    return (wx_inject,) * num_layers
+  if isinstance(wx_inject, int):
+    return tuple((i + 1) % wx_inject == 0 for i in range(num_layers))
+  assert len(wx_inject) == num_layers, (len(wx_inject), num_layers)
+  return tuple(wx_inject)
+
+
+class ICNN(nnx.Module):
+  r"""Input convex neural network (ICNN).
+
+  Implementation of input convex neural networks as introduced in
+  :cite:`amos:17` with flexible input re-injection, multiple rectifier
+  options, and optional positive-definite quadratic potentials
+  :cite:`vesseron:24`.
+
+  The network computes a convex function
+  :math:`f \colon \mathbb{R}^d \to \mathbb{R}^k` where convexity
+  holds component-wise when :math:`k > 1`.
+
+  Architecture::
+
+    z_0 = act(W_x0 @ x + b_0)
+    z_i = act(W_z_i @ z_{i-1} + W_x_i @ x + b_i)  # wx_inject controls W_x_i
+    z_N = W_z_N @ z_{N-1} + W_x_N @ x + b_N  # final layer is linear (no act)
+    out = z_N + pos_def_potentials(x)  # optional
+
+  Biases ``b_i`` (on ``W_x0`` and the ``W_z`` layers) are included only when
+  ``use_bias=True``; the ``W_x`` input-injection terms are always bias-free.
+  Convexity is enforced by requiring W_z_i >= 0 (via rectifier) and
+  using convex activation functions. The final layer applies no activation;
+  convexity is preserved since a non-negatively weighted sum (plus bias) of
+  convex features is convex.
+
+  Args:
+    dim_hidden: Sequence of hidden layer sizes. The output dimension
+      defaults to 1 (scalar potential); set ``output_dim`` for vector output.
+    input_dim: Dimension of the input ``x``.
+    output_dim: Output dimension. Defaults to 1 (scalar convex function).
+      When > 1, each output component is convex in the input.
+    rectifier_fn: Function applied to W_z kernels to enforce
+      non-negativity. The default is :func:`~jax.nn.softplus`.
+    act_fn: Activation function (must be convex for the network to be
+      convex). The default is :func:`~jax.nn.relu`.
+    wx_inject: Controls input re-injection at intermediate layers.
+    use_bias: Whether to use bias terms.
+    use_softmax: If True, the ``W_z`` :class:`PositiveDense
+      <ott.neural.networks.layers.posdef.PositiveDense>` layers use
+      column-wise softmax normalization instead of ``rectifier_fn``.
+    use_sinkhorn: If True, the ``W_z`` :class:`PositiveDense
+      <ott.neural.networks.layers.posdef.PositiveDense>` layers use
+      Sinkhorn normalization instead of ``rectifier_fn``.
+    pos_def_rank: Rank of optional PosDefPotentials term. Set to 0
+      to disable (default).
+    principled_init: If True, override ``wz_kernel_init`` and the W_z
+      bias initializer with the principled ICNN initialization of
+      :cite:`hoedt:2023`, which controls correlation and variance
+      propagation through layers with positive weights.
+    kernel_init: Initializer for W_x (unrestricted) weights.
+    wz_kernel_init: Initializer for W_z (positive) weights. Ignored when
+      ``principled_init=True``.
+    bias_init: Initializer for biases.
+    rngs: Random number generators.
   """
 
-  dim_data: int
-  dim_hidden: Sequence[int]
-  ranks: Union[int, Tuple[int, ...]] = 1
-  init_fn: Callable[[jax.Array, Tuple[int, ...], Any],
-                    jnp.ndarray] = DEFAULT_KERNEL_INIT
-  act_fn: Callable[[jnp.ndarray], jnp.ndarray] = DEFAULT_ACTIVATION
-  pos_weights: bool = False
-  rectifier_fn: Callable[[jnp.ndarray], jnp.ndarray] = DEFAULT_RECTIFIER
-  gaussian_map_samples: Optional[Tuple[jnp.ndarray, jnp.ndarray]] = None
+  def __init__(
+      self,
+      dim_hidden: Sequence[int],
+      *,
+      input_dim: int,
+      output_dim: int = 1,
+      rectifier_fn: Callable[[jax.Array], jax.Array] = jax.nn.softplus,
+      act_fn: Callable[[jax.Array], jax.Array] = jax.nn.relu,
+      wx_inject: Union[bool, Tuple[bool, ...], int] = True,
+      use_bias: bool = True,
+      use_softmax: bool = False,
+      use_sinkhorn: bool = False,
+      pos_def_rank: int = 0,
+      principled_init: bool = False,
+      kernel_init: nnx.initializers.Initializer = DEFAULT_KERNEL_INIT,
+      wz_kernel_init: nnx.initializers.Initializer = DEFAULT_KERNEL_INIT,
+      bias_init: nnx.initializers.Initializer = DEFAULT_BIAS_INIT,
+      rngs: nnx.Rngs,
+  ):
+    super().__init__()
+    self._output_dim = output_dim
+    self._act_fn_call = act_fn
 
-  def setup(self) -> None:  # noqa: D102
-    dim_hidden = list(self.dim_hidden) + [1]
-    *ranks, pos_def_rank = self._normalize_ranks()
+    dim_hidden = list(dim_hidden) + [output_dim]
+    dims = [input_dim] + dim_hidden
+    num_layers = len(dims) - 2
+    inject_mask = _normalize_wx_inject(wx_inject, num_layers)
 
-    # final layer computes average, still with normalized rescaling
-    self.w_zs = [self._get_wz(dim) for dim in dim_hidden[1:]]
-    # subsequent layers re-injected into convex functions
-    self.w_xs = [
-        self._get_wx(dim, rank) for dim, rank in zip(dim_hidden, ranks)
-    ]
-    self.pos_def_potentials = self._get_pos_def_potentials(pos_def_rank)
+    # Compute per-layer wz initializers for principled init
+    if principled_init:
+      alpha = _get_act_alpha(act_fn)
+      wz_kernel_inits = []
+      wz_bias_inits = []
+      for d_in in dims[1:-2]:
+        w_init, b_init = initializers.principled_icnn_init(
+            d_in, alpha=alpha, rectifier_fn=rectifier_fn
+        )
+        wz_kernel_inits.append(w_init)
+        wz_bias_inits.append(b_init)
+      # Last layer: identity activation (alpha=1)
+      if num_layers > 0:
+        w_init, b_init = initializers.principled_icnn_init(
+            dims[-2], alpha=1.0, rectifier_fn=rectifier_fn
+        )
+        wz_kernel_inits.append(w_init)
+        wz_bias_inits.append(b_init)
+    else:
+      wz_kernel_inits = [wz_kernel_init] * num_layers
+      wz_bias_inits = [bias_init] * num_layers
 
-  @nn.compact
-  def __call__(self, x: jnp.ndarray) -> float:  # noqa: D102
-    w_x, *w_xs = self.w_xs
-    assert len(self.w_zs) == len(w_xs), (len(self.w_zs), len(w_xs))
-
-    z = self.act_fn(w_x(x))
-    for w_z, w_x in zip(self.w_zs, w_xs):
-      z = self.act_fn(w_z(z) + w_x(x))
-    z = z + self.pos_def_potentials(x)
-
-    return z.squeeze()
-
-  def _get_wz(self, dim: int) -> nn.Module:
-    if self.pos_weights:
-      return posdef.PositiveDense(
-          dim,
-          kernel_init=self.init_fn,
-          use_bias=False,
-          rectifier_fn=self.rectifier_fn,
-      )
-
-    return nn.Dense(
-        dim,
-        kernel_init=self.init_fn,
-        use_bias=False,
+    self.wx0 = nnx.Linear(
+        input_dim,
+        dims[1],
+        use_bias=use_bias,
+        kernel_init=kernel_init,
+        bias_init=bias_init,
+        rngs=rngs,
     )
 
-  def _get_wx(self, dim: int, rank: int) -> nn.Module:
-    return posdef.PosDefPotentials(
-        rank=rank,
-        num_potentials=dim,
-        use_linear=True,
-        use_bias=True,
-        kernel_diag_init=nn.initializers.constant(-2.0),
-        rectifier_fn=jax.nn.softplus,
-        kernel_lr_init=self.init_fn,
-        kernel_linear_init=self.init_fn,
-        bias_init=nn.initializers.zeros,
+    self.wx_layers = nnx.List([
+        nnx.Linear(
+            input_dim,
+            d_out,
+            use_bias=False,
+            kernel_init=kernel_init,
+            rngs=rngs,
+        ) if inject else None
+        for d_out, inject in zip(dims[2:], inject_mask, strict=True)
+    ])
+
+    self.wz_layers = nnx.List([
+        posdef.PositiveDense(
+            d_in,
+            d_out,
+            rectifier_fn=rectifier_fn,
+            use_softmax=use_softmax,
+            use_sinkhorn=use_sinkhorn,
+            use_bias=use_bias,
+            kernel_init=k_init,
+            bias_init=b_init,
+            rngs=rngs,
+        ) for d_in, d_out, k_init, b_init in
+        zip(dims[1:-1], dims[2:], wz_kernel_inits, wz_bias_inits, strict=True)
+    ])
+
+    self.pos_def_potentials = (
+        posdef.PosDefPotentials(
+            input_dim,
+            output_dim,
+            rank=pos_def_rank,
+            use_linear=True,
+            use_bias=True,
+            rngs=rngs,
+        ) if pos_def_rank > 0 else None
     )
 
-  def _get_pos_def_potentials(self, rank: int) -> posdef.PosDefPotentials:
-    kwargs = {
-        "num_potentials": 1,
-        "use_linear": True,
-        "use_bias": True,
-        "bias_init": nn.initializers.zeros
-    }
+  def __call__(self, x: jax.Array) -> jax.Array:
+    """Evaluate the ICNN.
 
-    if self.gaussian_map_samples is None:
-      return posdef.PosDefPotentials(
-          rank=rank,
-          kernel_diag_init=nn.initializers.ones,
-          kernel_lr_init=nn.initializers.zeros,
-          kernel_linear_init=nn.initializers.zeros,
-          **kwargs,
-      )
+    Args:
+      x: Input of shape ``[..., input_dim]``.
 
-    source, target = self.gaussian_map_samples
-    return posdef.PosDefPotentials.init_from_samples(
-        source,
-        target,
-        rank=self.dim_data,
-        kernel_diag_init=nn.initializers.zeros,
-        **kwargs,
-    )
+    Returns:
+      Output of shape ``[...]`` if ``output_dim == 1``, else
+      ``[..., output_dim]``.
+    """
+    squeeze = x.ndim == 1
+    if squeeze:
+      x = x[None]
 
-  def _normalize_ranks(self) -> Tuple[int, ...]:
-    # +2 for the newly added layer with 1 + the final potentials
-    n_ranks = len(self.dim_hidden) + 2
-    if isinstance(self.ranks, int):
-      return (self.ranks,) * n_ranks
+    z = self._act_fn_call(self.wx0(x))
 
-    assert len(self.ranks) == n_ranks, (len(self.ranks), n_ranks)
-    return tuple(self.ranks)
+    num_layers = len(self.wz_layers)
+    for i, (wx,
+            wz) in enumerate(zip(self.wx_layers, self.wz_layers, strict=True)):
+      z = wz(z) + wx(x) if wx is not None else wz(z)
+      # The final layer is linear: no activation, so the (convex) potential
+      # is an unconstrained combination of the last hidden features.
+      if i != num_layers - 1:
+        z = self._act_fn_call(z)
+
+    if self.pos_def_potentials is not None:
+      z = z + self.pos_def_potentials(x)
+
+    if self._output_dim == 1:
+      z = z.squeeze(-1)
+
+    return z.squeeze(0) if squeeze else z
+
+  def gradient(self, x: jax.Array) -> jax.Array:
+    """Gradient of the convex potential w.r.t. input.
+
+    For scalar output (``output_dim == 1``), returns the gradient.
+    For vector output, returns the Jacobian.
+
+    Args:
+      x: Input of shape ``[batch, input_dim]``.
+
+    Returns:
+      Gradients of shape ``[batch, input_dim]`` (scalar output) or
+      ``[batch, output_dim, input_dim]`` (vector output).
+    """
+
+    def forward(x: jax.Array) -> jax.Array:
+      return nnx.merge(graphdef, state)(x)
+
+    graphdef, state = nnx.split(self)
+    if self._output_dim == 1:
+      return jax.vmap(jax.grad(forward))(x)
+    return jax.vmap(jax.jacobian(forward))(x)
 
   @property
-  def is_potential(self) -> bool:  # noqa: D102
+  def is_potential(self) -> bool:
+    """Whether this module represents a potential (True) or vector field."""
+    return True
+
+
+class KeyNet(nnx.Module):
+  r"""Vector-output network with ICNN-like architecture.
+
+  Introduced in :cite:`olausson:26` to amortize maximum inner product search
+  with learned support functions. Unlike :class:`ICNN`, which outputs a scalar
+  convex function and requires autodiff to compute gradients, KeyNet directly
+  outputs vectors. The architecture mirrors :class:`ICNN` but drops the
+  non-negativity constraint on the layer-to-layer weights :math:`W_z`.
+
+  Architecture::
+
+    z_0 = act(W_x0 @ x + b_0)
+    z_i = act(W_z_i @ z_{i-1} + W_x_i @ x + b_i)  # wx_inject controls W_x_i
+    z_N = W_z_N @ z_{N-1} + W_x_N @ x + b_N  # final layer is linear (no act)
+    out = x + z_N if resnet else z_N
+
+  Biases :math:`b_i` (on ``W_x0`` and the ``W_z`` layers) are included only
+  when ``use_bias=True``; the ``W_x`` input-injection terms are always
+  bias-free. The final layer applies no activation, so the output vector is
+  unconstrained (e.g. signed gradients). When ``resnet=True`` the output is
+  :math:`x + F(x)`, i.e. the model learns a correction to the input query.
+  The scalar potential is recovered as
+  :math:`f(x) = \langle \mathrm{KeyNet}(x), x \rangle`.
+
+  Args:
+    dim_hidden: Sequence of hidden layer sizes.
+    input_dim: Dimension of the input ``x``.
+    output_dim: Output vector dimension. Defaults to ``input_dim``.
+      Typically, equals the input dimension for gradient-of-potential
+      interpretation.
+    num_outputs: Number of output vectors.
+    resnet: If True, output :math:`x + F(x)` instead of :math:`F(x)`.
+    act_fn: Activation function.
+    wx_inject: Controls input re-injection pattern.
+    use_bias: Whether to use bias terms.
+    kernel_init: Initializer for all weights.
+    bias_init: Initializer for biases.
+    final_layer_scale: Scale for final layer init. Defaults to 0.01
+      for resnet mode (small initial corrections), 1.0 otherwise.
+    rngs: Random number generators.
+  """
+
+  def __init__(
+      self,
+      dim_hidden: Sequence[int],
+      *,
+      input_dim: int,
+      output_dim: Optional[int] = None,
+      num_outputs: Optional[int] = None,
+      resnet: bool = False,
+      act_fn: Callable[[jax.Array], jax.Array] = jax.nn.relu,
+      wx_inject: Union[bool, Tuple[bool, ...], int] = True,
+      use_bias: bool = True,
+      kernel_init: nnx.initializers.Initializer = DEFAULT_KERNEL_INIT,
+      bias_init: nnx.initializers.Initializer = DEFAULT_BIAS_INIT,
+      final_layer_scale: Optional[float] = None,
+      rngs: nnx.Rngs,
+  ):
+    super().__init__()
+    self._resnet = resnet
+    self._act_fn_call = act_fn
+    self._num_outputs = num_outputs
+
+    output_dim = output_dim if output_dim is not None else input_dim
+    if self._num_outputs is not None:
+      output_dim = output_dim * self._num_outputs
+    dims = [input_dim] + list(dim_hidden) + [output_dim]
+    num_layers = len(dims) - 2
+    inject_mask = _normalize_wx_inject(wx_inject, num_layers)
+
+    scale = final_layer_scale
+    if scale is None:
+      scale = 0.01 if resnet else 1.0
+
+    def scaled_init(s):
+
+      def init_fn(key, shape, dtype=None):
+        return s * kernel_init(key, shape, dtype)
+
+      return init_fn
+
+    self.wx0 = nnx.Linear(
+        input_dim,
+        dims[1],
+        use_bias=use_bias,
+        kernel_init=kernel_init,
+        bias_init=bias_init,
+        rngs=rngs,
+    )
+
+    self.wx_layers = nnx.List([
+        nnx.Linear(
+            input_dim,
+            d_out,
+            use_bias=False,
+            kernel_init=scaled_init(scale) if
+            (i == num_layers - 1) else kernel_init,
+            rngs=rngs
+        ) if inject else None
+        for i, (d_out,
+                inject) in enumerate(zip(dims[2:], inject_mask, strict=True))
+    ])
+
+    self.wz_layers = nnx.List([
+        nnx.Linear(
+            d_in,
+            d_out,
+            use_bias=use_bias,
+            kernel_init=scaled_init(scale) if
+            (i == len(dims) - 3) else kernel_init,
+            bias_init=bias_init,
+            rngs=rngs,
+        ) for i, (d_in,
+                  d_out) in enumerate(zip(dims[1:-1], dims[2:], strict=True))
+    ])
+
+  def __call__(self, x: jax.Array) -> jax.Array:
+    r"""Compute the scalar potential :math:`f(x) = \langle g(x), x \rangle`.
+
+    Here :math:`g(x)` is the vector returned by :meth:`gradient`.
+
+    Args:
+      x: Input of shape ``[batch_size, input_dim]``.
+
+    Returns:
+      Scalar output of shape ``[batch_size,]`` or ``[batch_size, num_outputs]``.
+    """
+    g = self.gradient(x)
+    if self._num_outputs is None:
+      return jnp.sum(g * x, axis=-1)
+    return jnp.sum(g * x[:, None], axis=-1)
+
+  def gradient(self, x: jax.Array) -> jax.Array:
+    """Compute the vector output (predicted gradient / key).
+
+    Args:
+      x: Input of shape ``[batch_size, input_dim]``.
+
+    Returns:
+      Output of shape ``[batch_size, output_dim]`` or
+      ``[batch_size, num_outputs, output_dim]``.
+    """
+    batch_size, _ = x.shape
+    z = self._act_fn_call(self.wx0(x))
+
+    num_layers = len(self.wz_layers)
+    for i, (wx,
+            wz) in enumerate(zip(self.wx_layers, self.wz_layers, strict=True)):
+      z = wz(z) + wx(x) if wx is not None else wz(z)
+      # The final layer is linear: no activation, so the vector output can
+      # take arbitrary values (e.g. signed gradients).
+      if i != num_layers - 1:
+        z = self._act_fn_call(z)
+
+    if self._resnet:
+      z = x + z
+    if self._num_outputs is not None:
+      z = z.reshape(batch_size, self._num_outputs, -1)
+    return z
+
+  @property
+  def is_potential(self) -> bool:
+    r"""KeyNet models a potential via :math:`f(x) = \langle g(x), x \rangle`."""
     return True
